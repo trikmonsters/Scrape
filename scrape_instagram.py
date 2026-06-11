@@ -5,55 +5,63 @@ import urllib.parse
 import httpx
 
 async def main():
-    # Kata kunci pencarian bebas (bukan hashtag, bisa pakai spasi)
-    keyword = "review moisturizer glad2glow"
+    # Kata kunci pencarian bebas (bisa pakai spasi)
+    keyword = "moisturizer glad2glow"
+    encoded_keyword = urllib.parse.quote_plus(keyword)
     
-    # Menggunakan metode Dorking pada mesin pencari AOL (Bing Engine)
-    query = f"site:instagram.com/reels/ {keyword}"
-    encoded_query = urllib.parse.quote_plus(query)
-    
-    # URL Pencarian AOL Search (Sangat toleran terhadap IP Github Actions)
-    url = f"https://search.aol.com/aol/search?q={encoded_query}"
+    # Menembak langsung ke search engine web viewer Instagram gratis (GreatFon)
+    # Jalur ini mengembalikan HTML berisi post/video yang relevan dengan kata kunci
+    url = f"https://greatfon.io/search?q={encoded_keyword}"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "id,en-US;q=0.7,en;q=0.3",
+        "Alt-Used": "greatfon.io"
     }
 
-    print(f"Mencari kata kunci '{keyword}' di Instagram Reels via AOL Index (Murni Gratis)...")
+    print(f"Memulai scraping via Web Viewer Gratis untuk kata kunci: '{keyword}'...")
     
     reels_list = []
     
     try:
-        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        # Gunakan limit timeout agak panjang karena web viewer gratisan kadang agak lambat
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
             
             if response.status_code == 200:
                 html_content = response.text
                 
-                # Regex untuk mencari shortcode unik dari link Reels Instagram di dalam HTML AOL
-                # Pola: instagram.com/reels/XXXXX/
-                raw_matches = re.findall(r'instagram\.com/reels/([a-zA-Z0-9_\-]+)', html_content)
+                # Pola 1: Mencari link shortcode instagram asli jika diteruskan langsung oleh web tersebut
+                # Pola 2: Mencari link internal video web tersebut (misal: /p/Cxxx/ atau /c/xxx) lalu kita ubah jadi link IG resmi
+                shortcodes = re.findall(r'/(?:p|reels|reel)/([a-zA-Z0-9_\-]+)', html_content)
                 
-                # Hapus duplikasi shortcode yang sama
-                unique_shortcodes = list(set(raw_matches))
+                # Bersihkan duplikat
+                unique_shortcodes = list(set(shortcodes))
                 
-                for shortcode in unique_shortcodes:
-                    # Bersihkan karakter sampah sisa link jika ada
-                    clean_code = shortcode.split('&')[0].split('%')[0].split('?')[0].split('"')[0]
-                    
-                    # Pastikan shortcode valid (IG shortcode biasanya minimal 5 karakter)
-                    if len(clean_code) >= 5:
+                for code in unique_shortcodes:
+                    if len(code) >= 5: # Validasi panjang ID Reels standar
                         reels_list.append({
-                            "video_url": f"https://www.instagram.com/reels/{clean_code}/",
-                            "description": f"Instagram Reels Video - {keyword}"
+                            "video_url": f"https://www.instagram.com/reels/{code}/",
+                            "description": f"Instagram Video Review - {keyword}"
                         })
             else:
-                print(f"Gagal menembus Search Engine. HTTP Status: {response.status_code}")
-                
+                print(f"Gagal memuat halaman Web Viewer. Status HTTP: {response.status_code}")
+                # Backup trik ke-2: Gunakan alternatif viewer lain (Picuki) jika GreatFon down
+                print("Mencoba jalur cadangan via Picuki...")
+                picuki_url = f"https://www.picuki.com/search?q={encoded_keyword}"
+                res_picuki = await client.get(picuki_url, headers=headers)
+                if res_picuki.status_code == 200:
+                    shortcodes = re.findall(r'/(?:p|media)/([a-zA-Z0-9_\-]+)', res_picuki.text)
+                    for code in list(set(shortcodes)):
+                        if len(code) >= 5:
+                            reels_list.append({
+                                "video_url": f"https://www.instagram.com/reels/{code}/",
+                                "description": f"Instagram Video Review (Picuki Alternative) - {keyword}"
+                            })
+
     except Exception as e:
-        print(f"Terjadi kendala teknis: {e}")
+        print(f"Terjadi kendala saat ekstraksi data: {e}")
 
     print(f"\n[HASIL] Berhasil mengekstrak {len(reels_list)} video Instagram Reels.")
     
@@ -61,7 +69,7 @@ async def main():
     with open("instagram_results.json", "w", encoding="utf-8") as f:
         json.dump(reels_list, f, indent=4, ensure_ascii=False)
         
-    # Cetak hasil ke log GitHub Actions agar Anda bisa langsung klik link-nya
+    # Cetak hasil ke log GitHub Actions
     for idx, reel in enumerate(reels_list[:15], 1):
         print(f"{idx}. {reel['description']}")
         print(f"   Link: {reel['video_url']}\n")
