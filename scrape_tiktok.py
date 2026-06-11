@@ -1,101 +1,72 @@
 import asyncio
 import json
-import re
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+import httpx
 
 async def main():
-    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=True,
-        text_mode=False,
-        headers={"User-Agent": user_agent},
-        extra_args=[
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--window-size=1920,1080"
-        ]
-    )
-
-    # Kita tidak pakai JsonCssExtractionStrategy karena rawan diblokir CSS-nya.
-    # Kita ambil HTML mentahnya saja, lalu kita bedah pakai Regex di Python.
-    run_config = CrawlerRunConfig(
-        wait_for='body', 
-        delay_before_return_html=10, # Beri waktu lebih lama agar data hydrasi TikTok selesai loading
-        cache_mode=CacheMode.BYPASS 
-    )
-
-    search_url = "https://www.tiktok.com/search/video?q=moisturizer%20g2g"
-    print(f"Memulai scraping data internal pada: {search_url}")
+    # Keyword pencarian: moisturizer g2g
+    keyword = "moisturizer g2g"
     
-    async with AsyncWebCrawler(config=browser_config) as crawler:
-        result = await crawler.arun(url=search_url, config=run_config)
+    # Menggunakan API publik TikWM untuk mencari video berdasarkan keyword
+    # API ini gratis, cepat, dan sudah membypass bot detection TikTok secara internal
+    api_url = "https://www.tikwm.com/api/feed/search"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    
+    params = {
+        "keywords": keyword,
+        "count": 10,     # Jumlah video yang ingin diambil
+        "cursor": 0
+    }
+
+    print(f"Memulai request pencarian TikTok via API untuk: '{keyword}'...")
+    
+    videos_list = []
+    
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(api_url, data=params, headers=headers)
+            
+            if response.status_code == 200:
+                res_json = response.json()
+                
+                # Cek apakah API mengembalikan data sukses
+                if res_json.get("code") == 0 and "data" in res_json:
+                    raw_videos = res_json["data"].get("videos", [])
+                    
+                    for vid in raw_videos:
+                        video_id = vid.get("video_id")
+                        author = vid.get("author", {}).get("unique_id")
+                        
+                        # Susun URL Video TikTok resmi
+                        if video_id and author:
+                            video_url = f"https://www.tiktok.com/@{author}/video/{video_id}"
+                            description = vid.get("title", "No Title")
+                            
+                            videos_list.append({
+                                "video_url": video_url,
+                                "description": description
+                            })
+                else:
+                    print(f"API merespon tetapi gagal memberikan data: {res_json.get('msg', 'Unknown Error')}")
+            else:
+                print(f"Gagal menghubungi API. HTTP Status: {response.status_code}")
+                
+    except Exception as e:
+        print(f"Terjadi error saat request API: {e}")
+
+    # Output Hasil
+    print(f"\n[HASIL] Berhasil mengekstrak {len(videos_list)} data video.")
+    
+    # Simpan hasil ke JSON agar Github Actions Artifact tidak error
+    with open("tiktok_results.json", "w", encoding="utf-8") as f:
+        json.dump(videos_list, f, indent=4, ensure_ascii=False)
         
-        videos_list = []
-
-        if result.success:
-            html_content = result.html
-            
-            # --- TRIK REGEX: Mencari JSON internal TikTok ---
-            # TikTok menyimpan data video di dalam window.__UNIVERSAL_DATA_FOR_REHYDRATION__ atau script SIGI_STATE
-            match = re.search(r'__UNIVERSAL_DATA_FOR_REHYDRATION__\s*=\s*({.+?});', html_content)
-            
-            if not match:
-                # Coba fallback ke pattern script kedua jika pattern pertama tidak ketemu
-                match = re.search(r'<script id="SIGI_STATE" type="application/json">({.+?})</script>', html_content)
-
-            if match:
-                try:
-                    raw_json = match.group(1)
-                    data = json.loads(raw_json)
-                    
-                    # Mencari objek video di dalam nested JSON secara rekursif (Simplifikasi pencarian)
-                    # Karena struktur JSON TikTok sangat dalam, kita cari pattern keyword url video
-                    urls = re.findall(r'"https://www\.tiktok\.com/@.*?/video/\d+"', raw_json)
-                    descriptions = re.findall(r'"desc"\s*:\s*"([^"]+)"', raw_json)
-                    
-                    # Bersihkan hasil duplikat
-                    urls = list(set([url.strip('"') for url in urls]))
-                    
-                    for idx, url in enumerate(urls):
-                        desc = descriptions[idx] if idx < len(descriptions) else "No Description"
-                        videos_list.append({
-                            "video_url": url,
-                            "description": desc.encode().decode('unicode-escape', errors='ignore')
-                        })
-                except Exception as e:
-                    print(f"Gagal memparsing struktur JSON internal: {e}")
-            
-            # Jika regex gagal, coba cara kasar (Regex langsung ke seluruh HTML) sebagai pertahanan terakhir
-            if not videos_list:
-                print("Mencoba ekstraksi langsung via Regex global...")
-                raw_urls = re.findall(r'https://www\.tiktok\.com/@[a-zA-Z0-9_.]+/video/\d+', html_content)
-                raw_urls = list(set(raw_urls)) # Hapus duplikat
-                
-                for url in raw_urls:
-                    videos_list.append({
-                        "video_url": url,
-                        "description": "TikTok Video Review (Glad2Glow)"
-                    })
-
-            print(f"\n[HASIL] Berhasil mengekstrak {len(videos_list)} data video.")
-            
-            # Simpan hasil ke JSON
-            with open("tiktok_results.json", "w", encoding="utf-8") as f:
-                json.dump(videos_list, f, indent=4, ensure_ascii=False)
-                
-            for idx, video in enumerate(videos_list[:15], 1): # Batasi print 15 teratas di log
-                print(f"{idx}. {video['description']}")
-                print(f"   Link: {video['video_url']}\n")
-                
-            if not videos_list:
-                print("[⚠️] TikTok benar-benar menyembunyikan konten dari IP ini. Menyimpan file debug...")
-                with open("debug_page.html", "w", encoding="utf-8") as f:
-                    f.write(html_content)
-        else:
-            print(f"Crawl gagal: {result.error_message}")
-            with open("tiktok_results.json", "w") as f: f.write("[]")
+    for idx, video in enumerate(videos_list, 1):
+        print(f"{idx}. {video['description']}")
+        print(f"   Link: {video['video_url']}\n")
 
 if __name__ == "__main__":
     asyncio.run(main())
