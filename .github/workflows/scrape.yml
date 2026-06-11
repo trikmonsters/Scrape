@@ -1,38 +1,41 @@
-name: TikTok Crawl4AI Scraper
+name: TikTok Product Review Scraper
 
+# Menentukan kapan workflow ini akan berjalan
 on:
-  workflow_dispatch: # Memungkinkan Anda menjalankan workflow ini secara manual dari tab Actions
+  workflow_dispatch: # Memungkinkan Anda menjalankan workflow ini secara manual dari tab Actions di GitHub
   schedule:
-    - cron: '0 0 * * *' # Otomatis berjalan setiap hari jam 12 malam UTC (Opsional)
+    - cron: '0 0 * * *' # Otomatis berjalan setiap hari jam 12 malam UTC (Opsional, bisa dihapus jika tidak dipakai)
 
 jobs:
-  scrape:
+  scrape_tiktok_job:
     runs-on: ubuntu-latest
 
     steps:
+    # Step 1: Mengambil kode dari repositori GitHub Anda
     - name: Checkout Repository
       uses: actions/checkout@v4
 
+    # Step 2: Menyiapkan lingkungan Python versi 3.10
     - name: Set up Python
-      uses: actions/checkout@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
+    # Step 3: Menginstal library httpx untuk melakukan request ke API
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install "crawl4ai @ git+https://github.com/unclecode/crawl4ai.git" pydantic playwright
-        
-    - name: Install Playwright Browsers
-      run: |
-        python -m playwright install --with-deps chromium
+        pip install httpx
 
-    - name: Run TikTok Scraper
+    # Step 4: Menjalankan script Python untuk mencari video moisturizer g2g
+    - name: Run TikTok Scraper Script
       run: |
         python scrape_tiktok.py
 
-    - name: Upload Scraping Results
+    # Step 5: Mengunggah hasil scraping (tiktok_results.json) agar bisa di-download di tab Actions
+    - name: Upload Scraping Results Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: tiktok-search-results
+        name: tiktok-moisturizer-g2g-results
         path: tiktok_results.json
+        retention-days: 7 # File hasil akan disimpan selama 7 hari sebelum otomatis dihapus oleh GitHub
