@@ -1,0 +1,38 @@
+name: TikTok Crawl4AI Scraper
+
+on:
+  workflow_dispatch: # Memungkinkan Anda menjalankan workflow ini secara manual dari tab Actions
+  schedule:
+    - cron: '0 0 * * *' # Otomatis berjalan setiap hari jam 12 malam UTC (Opsional)
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/checkout@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install "crawl4ai @ git+https://github.com/unclecode/crawl4ai.git" pydantic playwright
+        
+    - name: Install Playwright Browsers
+      run: |
+        python -m playwright install --with-deps chromium
+
+    - name: Run TikTok Scraper
+      run: |
+        python scrape_tiktok.py
+
+    - name: Upload Scraping Results
+      uses: actions/upload-artifact@v4
+      with:
+        name: tiktok-search-results
+        path: tiktok_results.json
