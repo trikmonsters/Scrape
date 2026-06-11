@@ -1,14 +1,11 @@
 import asyncio
 import json
-import os
+import re
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
-from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 
 async def main():
-    # 1. Gunakan User-Agent asli (menyamar sebagai pencari reguler di Chrome Windows)
     user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-    # 2. Set up Browser Config dengan proteksi anti-bot yang lebih ketat
     browser_config = BrowserConfig(
         headless=True,
         verbose=True,
@@ -17,84 +14,87 @@ async def main():
         extra_args=[
             "--disable-blink-features=AutomationControlled",
             "--disable-infobars",
-            "--window-size=1920,1080",
-            "--start-maximized"
+            "--window-size=1920,1080"
         ]
     )
 
-    # 3. Skema ekstraksi (diperluas agar fleksibel)
-    schema = {
-        "name": "TikTok Search Videos",
-        "baseSelector": 'div[data-e2e="search_video-item"], div[class*="DivVideoItem"]', # Menambahkan fallback selector
-        "fields": [
-            {
-                "name": "video_url",
-                "selector": 'a[href*="/video/"]',
-                "type": "attribute",
-                "attribute": "href"
-            },
-            {
-                "name": "description",
-                "selector": 'div[data-e2e="search-card-video-caption"], h1, div[class*="DivCaption"]',
-                "type": "text"
-            }
-        ]
-    }
-    
-    extraction_strategy = JsonCssExtractionStrategy(schema)
-
-    # 4. Trik: Menggunakan JavaScript Scroll yang lebih halus agar menyerupai manusia
-    js_scroll_code = """
-    for (let i = 0; i < 3; i++) {
-        window.scrollBy(0, window.innerHeight);
-        await new Promise(r => setTimeout(r, 1500));
-    }
-    """
-
-    # 5. Ubah 'wait_for' ke elemen 'body' agar jika kena Captcha, script tidak langsung timeout/crash,
-    # melainkan tetap mengambil isi halaman untuk kita analisa.
+    # Kita tidak pakai JsonCssExtractionStrategy karena rawan diblokir CSS-nya.
+    # Kita ambil HTML mentahnya saja, lalu kita bedah pakai Regex di Python.
     run_config = CrawlerRunConfig(
-        extraction_strategy=extraction_strategy,
-        js_code=js_scroll_code,
         wait_for='body', 
-        delay_before_return_html=8, # Beri waktu ekstra untuk loading konten JavaScript
+        delay_before_return_html=10, # Beri waktu lebih lama agar data hydrasi TikTok selesai loading
         cache_mode=CacheMode.BYPASS 
     )
 
     search_url = "https://www.tiktok.com/search/video?q=moisturizer%20g2g"
-    print(f"Memulai scraping pada: {search_url}")
+    print(f"Memulai scraping data internal pada: {search_url}")
     
     async with AsyncWebCrawler(config=browser_config) as crawler:
         result = await crawler.arun(url=search_url, config=run_config)
         
-        if result.success:
-            # Simpan screenshot/HTML mentah untuk debugging jika hasil kosong
-            if not result.extracted_content or result.extracted_content == "[]":
-                print("\n[⚠️ WARNING] Konten kosong. Kemungkinan besar terkena Captcha/Blokir IP GitHub.")
-                print("Mencoba menyimpan HTML mentah untuk analisa...")
-                with open("debug_page.html", "w", encoding="utf-8") as f:
-                    f.write(result.html)
-            
-            try:
-                videos = json.loads(result.extracted_content)
-            except Exception:
-                videos = []
+        videos_list = []
 
-            print(f"\nBerhasil mengekstrak {len(videos)} data video.")
+        if result.success:
+            html_content = result.html
             
-            # Tetap buat file JSON agar GitHub Actions tidak error saat upload artifact
-            with open("tiktok_results.json", "w", encoding="utf-8") as f:
-                json.dump(videos, f, indent=4, ensure_ascii=False)
+            # --- TRIK REGEX: Mencari JSON internal TikTok ---
+            # TikTok menyimpan data video di dalam window.__UNIVERSAL_DATA_FOR_REHYDRATION__ atau script SIGI_STATE
+            match = re.search(r'__UNIVERSAL_DATA_FOR_REHYDRATION__\s*=\s*({.+?});', html_content)
+            
+            if not match:
+                # Coba fallback ke pattern script kedua jika pattern pertama tidak ketemu
+                match = re.search(r'<script id="SIGI_STATE" type="application/json">({.+?})</script>', html_content)
+
+            if match:
+                try:
+                    raw_json = match.group(1)
+                    data = json.loads(raw_json)
+                    
+                    # Mencari objek video di dalam nested JSON secara rekursif (Simplifikasi pencarian)
+                    # Karena struktur JSON TikTok sangat dalam, kita cari pattern keyword url video
+                    urls = re.findall(r'"https://www\.tiktok\.com/@.*?/video/\d+"', raw_json)
+                    descriptions = re.findall(r'"desc"\s*:\s*"([^"]+)"', raw_json)
+                    
+                    # Bersihkan hasil duplikat
+                    urls = list(set([url.strip('"') for url in urls]))
+                    
+                    for idx, url in enumerate(urls):
+                        desc = descriptions[idx] if idx < len(descriptions) else "No Description"
+                        videos_list.append({
+                            "video_url": url,
+                            "description": desc.encode().decode('unicode-escape', errors='ignore')
+                        })
+                except Exception as e:
+                    print(f"Gagal memparsing struktur JSON internal: {e}")
+            
+            # Jika regex gagal, coba cara kasar (Regex langsung ke seluruh HTML) sebagai pertahanan terakhir
+            if not videos_list:
+                print("Mencoba ekstraksi langsung via Regex global...")
+                raw_urls = re.findall(r'https://www\.tiktok\.com/@[a-zA-Z0-9_.]+/video/\d+', html_content)
+                raw_urls = list(set(raw_urls)) # Hapus duplikat
                 
-            for idx, video in enumerate(videos, 1):
-                url = video.get('video_url', '')
-                desc = video.get('description', '').strip()
-                if url: # Hanya print yang memiliki link
-                    print(f"{idx}. {desc if desc else 'No Title'}")
-                    print(f"   Link: {url}\n")
+                for url in raw_urls:
+                    videos_list.append({
+                        "video_url": url,
+                        "description": "TikTok Video Review (Glad2Glow)"
+                    })
+
+            print(f"\n[HASIL] Berhasil mengekstrak {len(videos_list)} data video.")
+            
+            # Simpan hasil ke JSON
+            with open("tiktok_results.json", "w", encoding="utf-8") as f:
+                json.dump(videos_list, f, indent=4, ensure_ascii=False)
+                
+            for idx, video in enumerate(videos_list[:15], 1): # Batasi print 15 teratas di log
+                print(f"{idx}. {video['description']}")
+                print(f"   Link: {video['video_url']}\n")
+                
+            if not videos_list:
+                print("[⚠️] TikTok benar-benar menyembunyikan konten dari IP ini. Menyimpan file debug...")
+                with open("debug_page.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
         else:
-            print(f"Gagal melakukan crawl. Error: {result.error_message}")
-            # Buat file kosong agar step upload artifact di GitHub Actions tidak skip/error
+            print(f"Crawl gagal: {result.error_message}")
             with open("tiktok_results.json", "w") as f: f.write("[]")
 
 if __name__ == "__main__":
